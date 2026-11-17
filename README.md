@@ -91,11 +91,13 @@ linux-ops-agent/
 │   ├── safety/command_guard.py  命令白名单与危险语法拦截
 │   ├── memory/redis_store.py    会话历史 / 待确认操作（含内存降级）
 │   └── models/schemas.py
-├── knowledge/                   运维 SOP 知识库（5 类 25 条）
+├── knowledge/                   运维 SOP 知识库（5 类 27 条，约 1 万字）
 ├── scripts/
 │   ├── ingest.py                知识库入库
 │   └── run_agent_cli.py         命令行调试入口
-├── tests/test_command_guard.py  安全闸门的单元测试
+├── tests/
+│   ├── test_command_guard.py    命令闸门用例（28 条）
+│   └── test_tools_commands.py   工具下发命令的回归测试
 ├── web/                         Vue3 + Element Plus 前端
 ├── Dockerfile
 └── docker-compose.yml
@@ -179,7 +181,9 @@ docker compose up -d --build
 - `;` `&&` `||` 重定向、命令替换、换行一律拒绝，从根上杜绝"合法命令 + 注入第二条命令"；
 - 校验与执行分离，任何执行前必须过 `validate()`。
 
-`tests/test_command_guard.py` 里有 18 个用例覆盖正常命令与各种注入尝试。
+`tests/test_command_guard.py` 里有 28 条用例：10 条正常命令应放行、18 条危险与注入命令应拦截。
+`tests/test_tools_commands.py` 另外把每个工具真正下发的命令抓出来逐条过闸门——
+这个测试是补的，因为曾经出现过「工具自己写的命令被自己的闸门拦住」的自锁 bug。
 
 ### 3. 人在回路（Human-in-the-loop）
 
@@ -221,7 +225,7 @@ POST /api/actions/a1b2c3/confirm
 ## 已知限制
 
 - 工具默认操作 **Agent 所在机器**。要诊断远程主机需要接 SSH 通道（可作为下一步）。
-- 知识库是手写的 25 条 SOP，覆盖常见故障。真实场景应接入公司内部手册与历史工单。
+- 知识库是手写的 27 条 SOP，覆盖常见故障。真实场景应接入公司内部手册与历史工单。
 - 检索是单轮向量召回，没有重排（rerank）。条目变多后建议加一层 rerank 提升准确率。
 - 会话历史以纯文本存入 Redis，多轮对话里工具调用细节不保留。
 
