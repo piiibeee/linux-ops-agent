@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# 环境与密钥
+.env
+.env.local
+
+# 运行时数据
+data/
+!data/.gitkeep
+*.log
+
+# 前端
+web/node_modules/
+web/dist/
+web/.vite/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store

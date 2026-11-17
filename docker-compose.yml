@@ -1,0 +1,38 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: ops-agent-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  api:
+    build: .
+    container_name: ops-agent-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      # 容器内用服务名访问 redis，覆盖 .env 里的 localhost
+      REDIS_URL: redis://redis:6379/0
+      CHROMA_DIR: /app/data/chroma
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - chroma-data:/app/data/chroma
+      # 只读挂载宿主机日志，让 Agent 能读到真实日志（按需调整路径）
+      # - /var/log:/host-log:ro
+
+volumes:
+  redis-data:
+  chroma-data:
