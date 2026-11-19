@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ops-agent-config
+  namespace: ops-agent
+  labels:
+    app.kubernetes.io/name: ops-agent
+data:
+  LLM_MODEL: "qwen-plus"
+  LLM_BASE_URL: "https://dashscope.aliyuncs.com/compatible-mode/v1"
+  EMBED_MODEL: "text-embedding-v3"
+  COLLECTION: "ops_runbook"
+  RETRIEVAL_TOP_K: "4"
+  # 集群内用 Service 名访问 Redis，不要写 localhost
+  REDIS_URL: "redis://redis:6379/0"
+  CHROMA_DIR: "/app/data/chroma"
+  HISTORY_ROUNDS: "6"
+  SESSION_TTL: "21600"
+  ALLOW_EXECUTE: "true"
+  CMD_TIMEOUT: "10"
+  MAX_OUTPUT_CHARS: "4000"
+  RECURSION_LIMIT: "16"
+  TZ: "Asia/Shanghai"

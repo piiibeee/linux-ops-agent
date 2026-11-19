@@ -1,0 +1,21 @@
+# 可选：k3s 自带 Traefik，这条可以在浏览器里用 http://ops-agent.local 访问
+# 需要把 ops-agent.local 指向节点 IP（/etc/hosts 或 hosts 文件）
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ops-agent
+  namespace: ops-agent
+  annotations:
+    traefik.ingress.kubernetes.io/router.entrypoints: web
+spec:
+  rules:
+    - host: ops-agent.local
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api
+                port:
+                  number: 8000

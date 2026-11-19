@@ -27,8 +27,14 @@ SAFE_NAME = re.compile(r"^[a-zA-Z0-9@._:-]{1,64}$")
 # 只登记"范围明确、可回滚、影响可控"的操作，绝不提供任意命令执行入口。
 ACTIONS: dict[str, dict[str, str]] = {
     "vacuum_journal": {
-        "template": "journalctl --vacuum-time=7d",
-        "description": "清理 7 天前的 systemd journal 日志，释放 /var/log 空间",
+        # 按容量封顶而不是按时间窗：时间窗要人判断"几天合适"，容量才是硬约束，
+        # 能真正防止日志把盘写满。这也是生产上更常用的做法。
+        # /var/log/journal 下的归档属 root:systemd-journal，普通用户删不掉，所以带 sudo。
+        # 安全性由两层保证：
+        #   1) 命令白名单（command_guard 会剥掉 sudo 再校验 journalctl 本身）
+        #   2) /etc/sudoers.d/ops-agent 只授权这一条命令，别的一律拒绝
+        "template": "sudo journalctl --vacuum-size=16M",
+        "description": "把 systemd journal 日志压缩到 16MB 以内，释放 /var/log 空间（需 sudoers 精确授权）",
         "needs_target": "false",
     },
     "restart_service": {
@@ -42,6 +48,24 @@ ACTIONS: dict[str, dict[str, str]] = {
 async def _exec(command: str) -> str:
     result = await command_guard.run(command)
     return result.to_text()
+
+
+async def _journal_usage() -> str:
+    """journal 占用空间的单行摘要。
+
+    踩过的坑：模型想知道"日志占了多少"，但工具里只有读日志正文的 read_journal，
+    于是它反复调 read_journal 试图从正文里找容量，直到撞上 recursion_limit。
+    工具缺失导致的行为异常，只能靠补工具解决，提示词约束不住。
+
+    走 _exec 而不是直接 command_guard.run：这样这条命令同样会被
+    tests/test_tools_commands.py 抓出来过一遍闸门，不会成为校验盲区。
+    """
+    text = await _exec("journalctl --disk-usage")
+    if text.startswith("[执行失败]"):
+        return "[未能采集] 查询 journal 占用失败：" + text[len("[执行失败]"):].strip()
+    body = text.partition("\n")[2].strip()
+    # 原输出形如：Archived and active journals take up 256.0M in the file system.
+    return body.replace("\n", " ") if body else "[未能采集] journalctl --disk-usage 无输出"
 
 
 # ─────────────────── df 输出判读（避免把正常现象当故障）───────────────────
@@ -128,9 +152,11 @@ async def get_disk_usage() -> str:
     # 闸门禁止 `&&` 串联，所以分两次执行、在 Python 侧合并结果
     capacity = await _exec("df -hT")
     inodes = await _exec("df -i")
+    journal = await _journal_usage()
     return (
         f"{_split_mounts(capacity, type_col=1, use_col=5, label='容量 df -hT')}\n\n"
-        f"{_split_mounts(inodes, type_col=None, use_col=4, label='inode df -i')}"
+        f"{_split_mounts(inodes, type_col=None, use_col=4, label='inode df -i')}\n\n"
+        f"【日志占用 journalctl --disk-usage】\n{journal}"
     )
 
 
@@ -180,8 +206,14 @@ async def ping_host(host: str, count: int = 3) -> str:
 
 
 @tool
-async def read_journal(unit: str = "", lines: int = 60, priority: str = "") -> str:
-    """读取 systemd journal 日志。unit 为空则读全系统；priority 可填 err/warn 只看告警以上。"""
+async def read_journal(unit: str = "", lines: int = 60, priority: str = "", usage_only: bool = False) -> str:
+    """读取 systemd journal 日志。unit 为空则读全系统；priority 可填 err/warn 只看告警以上。
+    usage_only=True 时只返回 journal 占用了多少磁盘、不读正文——想判断"要不要清理日志"时用它，
+    不要为了找占用量反复读日志正文。返回结果头部始终带一行当前占用。"""
+    usage = await _journal_usage()
+    if usage_only:
+        return f"【journal 磁盘占用】{usage}"
+
     lines = max(10, min(int(lines or 60), 200))
     cmd = f"journalctl --no-pager -n {lines}"
     if unit:
@@ -190,7 +222,7 @@ async def read_journal(unit: str = "", lines: int = 60, priority: str = "") -> s
         cmd += f" -u {unit}"
     if priority in {"emerg", "alert", "crit", "err", "warning", "warn"}:
         cmd += f" -p {priority}"
-    return await _exec(cmd)
+    return f"【journal 磁盘占用】{usage}\n{await _exec(cmd)}"
 
 
 @tool

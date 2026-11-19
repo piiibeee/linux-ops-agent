@@ -98,3 +98,25 @@ def test_no_concatenation_in_tool_commands(monkeypatch) -> None:
     for command in captured:
         assert "&&" not in command, f"命令里出现了 &&：{command}"
         assert ";" not in command, f"命令里出现了 ;：{command}"
+
+
+def test_journal_usage_has_its_own_query(monkeypatch) -> None:
+    """回归测试：模型问"日志占多少"时必须能查到数值。
+
+    之前的版本没有这个能力，模型只能反复读日志正文去找容量，
+    最终把 ReAct 循环跑到 recursion_limit。usage_only=True 应该只查占用、不拉正文。
+    """
+    captured: list[str] = []
+
+    async def fake_exec(command: str) -> str:
+        captured.append(command)
+        return "$ " + command + "\nArchived and active journals take up 256.0M in the file system."
+
+    monkeypatch.setattr(tools_module, "_exec", fake_exec)
+
+    result = asyncio.run(tools_module.read_journal.ainvoke({"usage_only": True}))
+
+    assert captured == ["journalctl --disk-usage"], captured
+    assert "256.0M" in result
+    assert "journal --no-pager" not in " ".join(captured)
+

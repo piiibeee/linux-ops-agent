@@ -97,6 +97,38 @@ sudo apt install -y python3-venv python3-pip build-essential python3-dev
 
 `build-essential` 必须装：`chromadb` 相关的包在没预编译 wheel 时需要现场编译，缺 gcc 会直接失败。
 
+### 如果这一步特别慢（国内网络）
+
+Ubuntu 默认源在国外，`build-essential` 加依赖有一百多 MB，官方源 5–15 分钟是常态。
+
+**先判断是慢还是卡死**：进度百分比在涨就只是慢，等着别中断；一直停在 `0%` / `Waiting for headers` / `Reading package lists...` 超过两三分钟不动，就是源的问题。
+
+换阿里云镜像（先 `Ctrl+C` 中断，如果已中断先修一下 dpkg 状态）：
+
+```bash
+sudo dpkg --configure -a
+```
+
+然后执行换源，这段会自动判断你的 Ubuntu 版本，两种格式都覆盖：
+
+```bash
+# 22.04 及以前（/etc/apt/sources.list）
+if [ -f /etc/apt/sources.list ]; then sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak; sudo sed -i 's|http://archive.ubuntu.com|https://mirrors.aliyun.com|g; s|http://security.ubuntu.com|https://mirrors.aliyun.com|g; s|http://cn.archive.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list; fi
+
+# 24.04 及以后（deb822 格式，/etc/apt/sources.list.d/ubuntu.sources）
+if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then sudo cp /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list.d/ubuntu.sources.bak; sudo sed -i 's|http://archive.ubuntu.com|https://mirrors.aliyun.com|g; s|http://security.ubuntu.com|https://mirrors.aliyun.com|g; s|http://cn.archive.ubuntu.com|https://mirrors.aliyun.com|g' /etc/apt/sources.list.d/ubuntu.sources; fi
+
+sudo apt update
+```
+
+换完再重跑安装命令，通常一两分钟就完事。
+
+> **想更省时间**：`python3-venv` 才是必需的（三十几 MB），`build-essential` 是保险。
+> 可以先把 `python3-venv` 装上继续往下走，等 `pip install` 真报 gcc 错误了再补 `build-essential`。
+> ```bash
+> sudo apt install -y python3-venv
+> ```
+
 顺便确认运维命令都在（这是项目的工具层要用的）：
 
 ```bash
@@ -118,12 +150,61 @@ source .venv/bin/activate
 
 ## A5. 装 Python 依赖
 
+**先换国内镜像源，再装。** PyPI 官方源在国外，这一套依赖里 `chromadb` 会连带拉 `onnxruntime`、`tokenizers` 等大包，合计几百 MB，不换源会慢到以为卡死。
+
 ```bash
-pip install -U pip
+# 1. 升级 pip（新版下载并发更好、重试机制更稳）
+python -m pip install -U pip -i https://mirrors.aliyun.com/pypi/simple/
+
+# 2. 把镜像设为默认，之后所有 pip 命令自动走国内
+pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
+pip config set global.timeout 120
+
+# 3. 装依赖
 pip install -r requirements.txt
 ```
 
-这一步最慢，`chromadb` 比较大，正常要 **3–10 分钟**，不是卡死了。
+换源后正常 **1–3 分钟**；不换源可能二三十分钟甚至超时失败。
+
+不想改全局配置的，用一次性参数：
+
+```bash
+pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/ --timeout 120 --retries 5
+```
+
+### 换源后还是慢 / 卡在某个包
+
+先看卡在哪个包名上，单独装它试，能快速定位：
+
+```bash
+pip install chromadb==0.5.23 -i https://mirrors.aliyun.com/pypi/simple/ --timeout 120 -v
+```
+
+**镜像同步延迟**：如果报 `No matching distribution found for xxx==x.x.x`，说明这个镜像还没同步该版本。加上官方源做后备，让 pip 找不到时回落：
+
+```bash
+pip install -r requirements.txt \
+  -i https://mirrors.aliyun.com/pypi/simple/ \
+  --extra-index-url https://pypi.org/simple \
+  --timeout 120
+```
+
+**换一个镜像**（下面耗时是在你这台机器上实测的，同一个 `chromadb` 索引页）：
+
+| 镜像 | 地址 | 实测 |
+|---|---|---|
+| 华为云 | `https://mirrors.huaweicloud.com/repository/pypi/simple/` | 0.30s |
+| 阿里云 | `https://mirrors.aliyun.com/pypi/simple/` | 0.43s |
+| 腾讯云 | `https://mirrors.cloud.tencent.com/pypi/simple/` | 0.44s |
+| 中科大 | `https://mirrors.ustc.edu.cn/pypi/simple/` | 0.74s |
+| 清华 | `https://pypi.tuna.tsinghua.edu.cn/simple/` | 2.21s |
+| 官方 PyPI | `https://pypi.org/simple/` | **12s 超时** |
+
+```bash
+pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
+```
+
+> 中断过不用从头来，pip 有缓存（`~/.cache/pip`），已经下完的包不会重下。
 
 **如果报错按这个顺序试：**
 
@@ -275,12 +356,108 @@ git push -u origin main
 - [ ] 待确认操作卡片能点「确认」并真的执行
 - [ ] GitHub 仓库公开可访问，README 里的截图/说明与代码一致
 
+## A10. 变更操作的 sudo 授权（演示第三幕必须做）
+
+「清理 journal 日志」这个动作，普通用户执行会失败：
+
+```
+Failed to delete archived journal ...: Permission denied
+Vacuuming done, freed 0B
+```
+
+原因：`/var/log/journal` 下的归档文件属 `root:systemd-journal`，只有 root 能删。
+服务是以你自己的用户身份跑的，所以 Agent 点「确认」后同样会被拒。
+
+**不要用 `sudo` 启动服务**（那等于给 Agent root，安全叙事就崩了）。
+正确做法是只授权这一条命令：
+
+```bash
+echo 'pboio ALL=(root) NOPASSWD: /usr/bin/journalctl --vacuum-size=*' | sudo tee /etc/sudoers.d/ops-agent
+sudo chmod 440 /etc/sudoers.d/ops-agent
+sudo visudo -c          # 必须显示 parsed OK，否则先修好，别关终端
+```
+
+> 用户名不是 `pboio` 就换成 `whoami` 的输出。
+> **`sudo visudo -c` 这步必须做**——sudoers 语法错了会让 sudo 整个失效。
+
+验证（应该直接出结果，不提示输密码）：
+
+```bash
+sudo -n journalctl --vacuum-size=16M
+```
+
+再验一条不该放行的，必须被拒：
+
+```bash
+sudo -n systemctl restart nginx      # 期望：a password is required / 不在授权范围
+```
+
+> **为什么用 `--vacuum-size` 而不是 `--vacuum-time`**：时间窗要人判断"几天算合适"，
+> 而容量是硬约束。日志能不能把盘写满，只取决于总量，不取决于它有多老。
+> 顺带一个坑：`--vacuum-time=7d` 只删 7 天前的归档，如果日志是最近几天堆起来的
+> （比如密集装包），它几乎删不动——257M 的日志可能只释放 24M。
+
+`journalctl --vacuum-size=16M` 这条命令本身**仍然要过白名单**：`command_guard`
+会把 `sudo` 前缀剥掉再校验 `journalctl`，所以 `sudo rm -rf /` 照样被拦（已验证）。
+
+**两层控制，面试可以这么讲**：
+
+> 白名单管「模型能表达出哪些命令」，sudoers 管「这些命令能以什么身份跑到什么程度」。
+> 不是我给 Agent 开了 root，而是我给它开了一条最小授权规则——只能清理 7 天前的 journal，
+> 别的一条都不行。
+
+授权后重启后端，第三幕才能演示成功。
+
+---
+
+## A11. 代码改了怎么同步进 WSL（不用重拷整个目录）
+
+项目在 Windows 侧改完后（`C:\Users\51265\WorkBuddy\2026-11-16-19-52-01\linux-ops-agent`），
+只同步改过的文件，**不要**整个目录覆盖过去——WSL 里的 `.env` 有真实 Key、`data/chroma` 是建好的向量库，
+全量覆盖会把它们冲掉。
+
+```bash
+cd ~/linux-ops-agent
+SRC=/mnt/c/Users/51265/WorkBuddy/2026-11-16-19-52-01/linux-ops-agent
+
+# 1) 同步代码（按需增删文件名，只拷改过的）
+cp $SRC/app/agent/graph.py  $SRC/app/agent/loop_guard.py \
+   $SRC/app/agent/tools.py  $SRC/app/agent/prompts.py  app/agent/
+cp $SRC/app/config.py app/config.py
+cp $SRC/tests/test_loop_guard.py $SRC/tests/test_tools_commands.py tests/
+cp $SRC/scripts/eval_agent.py scripts/
+
+# 2) 补 .env 里的新配置（幂等，重复执行也不会写重复行）
+sed -i 's/^RECURSION_LIMIT=.*/RECURSION_LIMIT=40/' .env
+grep -q '^MAX_TOOL_ROUNDS' .env || printf 'MAX_TOOL_ROUNDS=6\nMAX_CALLS_PER_ROUND=6\n' >> .env
+
+# 3) 知识库内容改过就要重建（全量覆盖 collection，不会残留旧切片）
+python -m scripts.ingest
+
+# 4) 重启后端（`--reload` 会自动重载代码，但 .env 改动必须整进程重启才生效）
+```
+
+改完的验收方式：问一句「看一下 journal 占了多少空间」，应该**一次工具调用**就答出
+`journalctl --disk-usage` 的数值，不再出现一串重复的 `read_journal`。
+
+再跑一次评测集，确认改动没有破坏原有行为（**改提示词、换模型之后必跑**）：
+
+```bash
+python -m scripts.eval_agent
+```
+
+9 条用例、5 分钟左右，报告落在 `reports/eval-<时间戳>.md`。
+第一次跑允许有几条不通过——那几条就是待修清单，修完再跑，通过率要写进 README。
+
+---
+
 ## 常见报错速查
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
 | `ModuleNotFoundError: No module named 'app'` | 不在项目根目录，或没激活 venv | `cd ~/linux-ops-agent && source .venv/bin/activate` |
-| `ToolNode` 导入报错 | langchain 版本差异 | `pip install -U langgraph langchain-core` |
+| `ToolNode` 导入报错 | 旧版本代码，已改为自实现工具节点 | 同步 `app/agent/graph.py`（见 A11） |
+| `Recursion limit of N reached` | 模型陷入工具循环 | 新版已有去重 + 轮数预算兜底；仍出现就检查 `.env` 的 `MAX_TOOL_ROUNDS` / `RECURSION_LIMIT` |
 | `astream_events` 报参数错误 | 同上 | 同上；仍报错把完整 traceback 发我 |
 | 对话时提示 Redis 连不上 | 没起 Redis | **可以忽略**，代码会自动降级为内存存储 |
 | `401 Unauthorized` / `InvalidApiKey` | Key 错或没填 | 回 A7，注意别把引号带进去 |

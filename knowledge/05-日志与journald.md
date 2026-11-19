@@ -22,7 +22,12 @@
 **排查**：`journalctl --disk-usage` 确认实际占用；`cat /etc/systemd/journald.conf | grep -E "SystemMaxUse|MaxRetentionSec"` 看是否配置了上限。
 
 **处置**
-1. 立即回收：`journalctl --vacuum-time=7d`（保留 7 天）或 `journalctl --vacuum-size=500M`（保留 500MB）。
+1. 立即回收：`sudo journalctl --vacuum-size=16M`（按容量封顶）或 `journalctl --vacuum-time=7d`（保留 7 天）。
+   - **优先按容量封顶**：时间窗要人判断"留几天合适"，容量才是硬约束；日志暴涨时 7 天内的量也可能把盘写满
+     （实测 257M 全落在最近 7 天内，按时间窗只回收 24M，按容量封顶才真正腾出空间）。
+   - `/var/log/journal` 下的归档属 `root:systemd-journal`，普通用户删不掉，需 sudo；
+     生产上给 sudoers 精确授权这一条命令即可，不要 `NOPASSWD: ALL`。
+   - 只回收已归档文件，正在写入的活动日志不受影响，`systemd-journald` 无需重启。
 2. 长期治理：在 `journald.conf` 中设置 `SystemMaxUse=500M`、`MaxRetentionSec=2week`，然后 `systemctl restart systemd-journald`。
 3. **注意**：清理是治标，日志暴涨的根因（某服务疯狂刷错误日志）必须单独排查。
 

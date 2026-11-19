@@ -33,7 +33,13 @@ class Settings(BaseSettings):
     max_output_chars: int = 4000     # 单次命令输出截断，防止撑爆上下文
 
     # ── Agent ──────────────────────────────────────────────
-    recursion_limit: int = 16        # 图的最大步数，防止工具循环
+    # 图的最大步数。一次工具轮 = agent + tools 两步，所以 40 约等于 18 轮，
+    # 比 max_tool_rounds 宽松，真正先触发的是业务预算而不是框架报错。
+    recursion_limit: int = 40
+    # 单轮对话里允许的工具轮数预算：到这里强制收尾，用已有证据作答
+    max_tool_rounds: int = 6
+    # 单条 AIMessage 里允许并行发起的工具调用数，多余的丢弃
+    max_calls_per_round: int = 6
 
 
 @lru_cache

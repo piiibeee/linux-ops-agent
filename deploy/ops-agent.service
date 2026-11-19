@@ -1,0 +1,36 @@
+[Unit]
+Description=Linux Ops Agent (FastAPI + LangGraph)
+Documentation=https://github.com/piiibeee/linux-ops-agent
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ops
+Group=ops
+WorkingDirectory=/opt/ops-agent
+EnvironmentFile=/opt/ops-agent/.env
+
+# 只监听回环，对外一律走 Nginx
+ExecStart=/opt/ops-agent/.venv/bin/uvicorn app.main:app \
+          --host 127.0.0.1 --port 8000 \
+          --proxy-headers --forwarded-allow-ips=127.0.0.1
+
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillSignal=SIGTERM
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ops-agent
+
+# 注意：这里故意不写 NoNewPrivileges=true。
+# 变更操作（journal 清理）依赖 sudo 提权，加上这条会让 sudo 直接失败。
+# 安全边界靠命令白名单 + sudoers 精确授权（只放行 journalctl --vacuum-size=*），不靠这个开关。
+PrivateTmp=true
+ProtectHome=true
+ReadWritePaths=/opt/ops-agent/data
+
+[Install]
+WantedBy=multi-user.target

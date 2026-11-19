@@ -25,3 +25,6 @@ web/.vite/
 .vscode/
 .idea/
 .DS_Store
+
+# k8s 里的真实 Secret（含 API Key），只提交 example
+k8s/01-secret.yaml

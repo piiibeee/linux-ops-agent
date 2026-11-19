@@ -4,42 +4,57 @@
     │  agent   │ ───────────────►  │ tools  │
     │ (LLM)    │ ◄───────────────  │ (执行) │
     └────┬─────┘      回填结果      └────────┘
-         │ 无 tool_calls
+         │ 无 tool_calls / 预算用完
          ▼
-        END
+     END / finalize（不带工具，强制收尾作答）
 
 为什么手写 StateGraph 而不用 create_react_agent：
 1. 需要在执行工具前后向前端推事件（SSE），自己控边更直接；
-2. 后续要插入人工确认节点、检索前置节点时，手写图更好扩展；
+2. 需要自己控制工具节点：去重、轮数预算、异常兜底（见 loop_guard.py）；
 3. 面试时能讲清每一步的状态流转，而不是"调了个封装"。
 """
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any, AsyncIterator, TypedDict
+from uuid import uuid4
 
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
-from langgraph.prebuilt import ToolNode
 
 from app.agent.context import current_session_id
+from app.agent.loop_guard import (
+    DUPLICATE_HINT,
+    TOO_MANY_HINT,
+    budget_exhausted_hint,
+    call_signature,
+    is_recursion_error,
+    recursion_error_message,
+)
 from app.agent.prompts import SYSTEM_PROMPT, history_to_messages
 from app.agent.tools import ALL_TOOLS
 from app.config import get_settings
 from app.memory.redis_store import store
 from app.safety import command_guard
 
+TOOL_MAP: dict[str, BaseTool] = {t.name: t for t in ALL_TOOLS}
 
-class AgentState(TypedDict):
+
+class AgentState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
+    # 已经执行过的工具轮数（一轮 = 一次 AIMessage 发起的全部调用）
+    tool_rounds: int
+    # 本轮已执行过的调用指纹，用于拦截重复调用
+    seen_calls: dict[str, str]
 
 
-def _build_llm():
+def _build_llm(*, with_tools: bool):
     settings = get_settings()
-    return ChatOpenAI(
+    llm = ChatOpenAI(
         model=settings.llm_model,
         api_key=settings.dashscope_api_key,
         base_url=settings.llm_base_url,
@@ -48,28 +63,122 @@ def _build_llm():
         timeout=60,
         max_retries=1,
     )
+    return llm.bind_tools(ALL_TOOLS) if with_tools else llm
 
 
 def _build_graph():
-    llm_with_tools = _build_llm().bind_tools(ALL_TOOLS)
+    llm_with_tools = _build_llm(with_tools=True)
+    # 收尾节点用不绑工具的同一个模型：结构上就不可能再发起工具调用
+    llm_plain = _build_llm(with_tools=False)
 
     async def call_model(state: AgentState) -> dict[str, Any]:
         messages = [SystemMessage(content=SYSTEM_PROMPT), *state["messages"]]
         response = await llm_with_tools.ainvoke(messages)
         return {"messages": [response]}
 
+    async def run_tools(state: AgentState) -> dict[str, Any]:
+        """执行工具调用。
+
+        与 ToolNode 的差别（也是这次踩坑换来的）：
+        - 同参数重复调用只执行一次，回一条说明让模型换个方向，而不是无休止重试；
+        - 单轮调用数超限时丢弃多余部分；
+        - 工具抛异常转成 ToolMessage，不让整个图崩掉。
+        """
+        settings = get_settings()
+        last = state["messages"][-1]
+        seen = dict(state.get("seen_calls") or {})
+        rounds = int(state.get("tool_rounds") or 0) + 1
+
+        outputs: list[ToolMessage] = []
+        for index, call in enumerate(last.tool_calls):  # type: ignore[union-attr]
+            name = call.get("name", "")
+            args = call.get("args") or {}
+            call_id = call.get("id") or f"call_{uuid4().hex[:8]}"
+
+            if index >= settings.max_calls_per_round:
+                outputs.append(
+                    ToolMessage(
+                        content=TOO_MANY_HINT.format(limit=settings.max_calls_per_round),
+                        tool_call_id=call_id,
+                        name=name,
+                    )
+                )
+                continue
+
+            signature = call_signature(name, args)
+            if signature in seen:
+                outputs.append(
+                    ToolMessage(
+                        content=DUPLICATE_HINT.format(name=name),
+                        tool_call_id=call_id,
+                        name=name,
+                    )
+                )
+                continue
+
+            tool = TOOL_MAP.get(name)
+            if tool is None:
+                outputs.append(
+                    ToolMessage(
+                        content=f"[未知工具] {name} 不存在，可用工具：{list(TOOL_MAP)}",
+                        tool_call_id=call_id,
+                        name=name,
+                    )
+                )
+                continue
+
+            try:
+                result = await tool.ainvoke(args)
+            except Exception as exc:  # noqa: BLE001 —— 工具失败要变成"观察结果"，不能中断图
+                result = f"[工具执行失败] {name}: {exc}"
+
+            text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
+            seen[signature] = text[:300]
+            outputs.append(ToolMessage(content=text, tool_call_id=call_id, name=name))
+
+        return {"messages": outputs, "tool_rounds": rounds, "seen_calls": seen}
+
+    async def finalize(state: AgentState) -> dict[str, Any]:
+        """预算用尽后的收尾：不带工具再问一次，强制它把话说完。"""
+        settings = get_settings()
+        messages: list[AnyMessage] = [SystemMessage(content=SYSTEM_PROMPT), *state["messages"]]
+
+        # 关键细节：进入这里的最后一条是带 tool_calls 的 AIMessage，但预算已用尽、调用没执行。
+        # OpenAI 兼容接口要求每个 tool_call 后面必须有对应的 tool 消息，否则直接 400。
+        # 所以补一批"未执行"的 ToolMessage，既满足协议，也如实告诉模型这一步被跳过了。
+        last = messages[-1]
+        if isinstance(last, AIMessage) and last.tool_calls:
+            for call in last.tool_calls:
+                messages.append(
+                    ToolMessage(
+                        content="[未执行] 工具轮数预算已用尽，本次调用被跳过。请基于已有证据作答。",
+                        tool_call_id=call.get("id") or f"skipped_{uuid4().hex[:8]}",
+                        name=call.get("name", ""),
+                    )
+                )
+
+        messages.append(SystemMessage(content=budget_exhausted_hint(settings.max_tool_rounds)))
+        response = await llm_plain.ainvoke(messages)
+        return {"messages": [response]}
+
     def should_continue(state: AgentState) -> str:
         last = state["messages"][-1]
-        if isinstance(last, AIMessage) and last.tool_calls:
-            return "tools"
-        return END
+        if not (isinstance(last, AIMessage) and last.tool_calls):
+            return END
+        if int(state.get("tool_rounds") or 0) >= get_settings().max_tool_rounds:
+            return "finalize"
+        return "tools"
 
     builder = StateGraph(AgentState)
     builder.add_node("agent", call_model)
-    builder.add_node("tools", ToolNode(ALL_TOOLS))
+    builder.add_node("tools", run_tools)
+    builder.add_node("finalize", finalize)
     builder.set_entry_point("agent")
-    builder.add_conditional_edges("agent", should_continue, {"tools": "tools", END: END})
+    builder.add_conditional_edges(
+        "agent", should_continue, {"tools": "tools", "finalize": "finalize", END: END}
+    )
     builder.add_edge("tools", "agent")
+    builder.add_edge("finalize", END)
     return builder.compile()
 
 
@@ -105,7 +214,9 @@ async def stream_chat(session_id: str, user_text: str) -> AsyncIterator[dict[str
 
     history = await store.get_history(session_id)
     inputs: dict[str, Any] = {
-        "messages": [*history_to_messages(history), HumanMessage(content=user_text)]
+        "messages": [*history_to_messages(history), HumanMessage(content=user_text)],
+        "tool_rounds": 0,
+        "seen_calls": {},
     }
     config = {"recursion_limit": settings.recursion_limit}
 
@@ -138,7 +249,9 @@ async def stream_chat(session_id: str, user_text: str) -> AsyncIterator[dict[str
                 yield {"type": "tool_end", "name": name, "output": text[:2000]}
 
     except Exception as exc:  # noqa: BLE001 —— 图执行异常要传给前端，而不是静默失败
-        yield {"type": "error", "message": f"Agent 执行异常：{exc}"}
+        # 撞到框架步数上限时给中文提示；其他异常保留原文便于排查
+        message = recursion_error_message() if is_recursion_error(exc) else f"Agent 执行异常：{exc}"
+        yield {"type": "error", "message": message}
     finally:
         current_session_id.reset(session_token)
 
