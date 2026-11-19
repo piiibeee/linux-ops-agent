@@ -7,6 +7,24 @@
 > ▶ **[演示视频（B 站，约 1 分钟）](https://www.bilibili.com/video/BV1RZsu6DEb5)**：
 > 磁盘告警 → 日志诊断 → 待确认卡片 → 危险命令被闸门拦下，一次看完。
 
+## 线上运行
+
+已部署在一台阿里云轻量服务器上（Ubuntu 24.04 / 2 核 2G，systemd + Nginx 直跑宿主机），
+下面不是本地截图，是线上实例的真实输出：
+
+<img src="docs/demo-human-in-the-loop.png" width="720" alt="Agent 生成待确认操作，人工确认后执行并回传真实输出">
+
+提问「帮我清理 journal 日志」之后发生的事：
+
+1. `read_journal` 读到 journal 实际占用 **245.7 MB**
+2. `propose_action` 生成待确认卡片，命令是 `sudo journalctl --vacuum-size=16M`
+3. 人点「确认执行」——**在这之前不会动服务器任何东西**
+4. 回传真实执行输出：删掉两份归档（102.3M + 111.4M），**释放 213.7 MB**
+
+> 为什么不是 229 MB（245.7 − 16）？`--vacuum-size` 是按归档**文件**粒度删除的，
+> 不能把一个 journal 文件切一半，所以最终占用落在「16MB ~ 16MB + 单个文件大小」之间。
+> 容量型清理的保留量永远是「不超过阈值」，不是「等于阈值」。
+
 ---
 
 ## 它解决什么问题
@@ -118,6 +136,9 @@ linux-ops-agent/
 > **第一次部署请先看 [`SETUP.md`](SETUP.md)**——里面有逐步命令、预期输出和常见报错处理。
 > 下面是已经在 Linux 环境下的简版流程；如果用的是 Windows，务必先按 SETUP.md 进 WSL，
 > 本项目依赖 `journalctl` / `systemctl` / `ss` 等 Linux 专有命令。
+>
+> 要部署到公网服务器，看 [`deploy/DEPLOY.md`](deploy/DEPLOY.md)：systemd 托管 + Nginx 同域反代 + 限流，
+> 一条 `bash deploy/deploy.sh` 跑完（幂等，可重复执行用于更新）。
 
 ### 1. 准备
 
@@ -287,6 +308,10 @@ python -m scripts.eval_agent --only journal
 - 知识库是手写的 27 条 SOP，覆盖常见故障。真实场景应接入公司内部手册与历史工单。
 - 检索是单轮向量召回，没有重排（rerank）。条目变多后建议加一层 rerank 提升准确率。
 - 会话历史以纯文本存入 Redis，多轮对话里工具调用细节不保留。
+- **线上是宿主机直跑（systemd + Nginx），不是容器。** Agent 要执行 `journalctl` / `df` / `systemctl`，
+  在容器里它看到的只是容器自己——磁盘挂着 overlay、journal 是空的、`systemctl` 直接不可用。
+  `docker-compose.yml` 保留用于本地体验和依赖隔离，生产部署用 `deploy/`。
+  这不是"不会容器化"，是这类 Agent 不能容器化。
 
 ## 下一步
 
