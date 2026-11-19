@@ -78,17 +78,22 @@ usermod -aG adm "${APP_USER}" 2>/dev/null || true
 c_ok "已授权读取 journal 与 /var/log"
 
 # ── 3. 代码 ─────────────────────────────────────────────
+# 先把目录属主交给运行用户。踩过的坑：目录若由 root 手动 clone，
+# 用 ops 执行 git 会报 "detected dubious ownership" 并直接退出。
+mkdir -p "${APP_DIR}"
+chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}" 2>/dev/null || true
+
 if [ -d "${APP_DIR}/.git" ]; then
   c_info "更新代码"
+  # 显式声明安全目录，跨用户操作仓库时 git 才肯干活
+  sudo -u "${APP_USER}" git config --global --add safe.directory "${APP_DIR}" 2>/dev/null || true
   sudo -u "${APP_USER}" git -C "${APP_DIR}" fetch --all -q
   # 跟随仓库当前分支，不硬编码 main（master 也能用）
   BRANCH=$(sudo -u "${APP_USER}" git -C "${APP_DIR}" rev-parse --abbrev-ref HEAD)
   sudo -u "${APP_USER}" git -C "${APP_DIR}" reset --hard "origin/${BRANCH}" -q
 else
   c_info "克隆仓库到 ${APP_DIR}"
-  mkdir -p "${APP_DIR}"
-  chown "${APP_USER}:${APP_USER}" "${APP_DIR}"
-  sudo -u "${APP_USER}" git clone -q "${REPO}" "${APP_DIR}"
+  sudo -u "${APP_USER}" git -c safe.directory="${APP_DIR}" clone -q "${REPO}" "${APP_DIR}"
 fi
 chown -R "${APP_USER}:${APP_USER}" "${APP_DIR}"
 mkdir -p "${APP_DIR}/data/chroma"
