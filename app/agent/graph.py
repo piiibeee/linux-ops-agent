@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Annotated, Any, AsyncIterator, TypedDict
 from uuid import uuid4
 
@@ -37,6 +38,7 @@ from app.agent.loop_guard import (
 )
 from app.agent.prompts import SYSTEM_PROMPT, history_to_messages
 from app.agent.tools import ALL_TOOLS
+from app.audit.store import audit_store
 from app.config import get_settings
 from app.memory.redis_store import store
 from app.safety import command_guard
@@ -201,6 +203,21 @@ def _chunk_text(chunk: Any) -> str:
     return ""
 
 
+def _judge_tool_status(text: str) -> str:
+    """把工具返回的文本归成三态，供审计页筛选。
+
+    为什么用关键字判断而不是结构化返回：工具返回本来就是给模型看的自然语言/JSON，
+    改成统一结构要动 10 个工具函数，收益不抵风险。关键字是近似，但它只影响
+    "审计页上的一个状态标签"，不影响任何执行逻辑——用错也没代价。
+    """
+    if text.startswith("[工具执行失败]"):
+        return "error"
+    blocked_marks = ("未通过安全校验", "不在白名单", "已被拒绝", "拒绝执行", "拦截")
+    if any(mark in text for mark in blocked_marks):
+        return "blocked"
+    return "ok"
+
+
 async def stream_chat(session_id: str, user_text: str) -> AsyncIterator[dict[str, Any]]:
     """执行一轮对话，边跑边产出事件。
 
@@ -223,6 +240,13 @@ async def stream_chat(session_id: str, user_text: str) -> AsyncIterator[dict[str
     collected: list[str] = []
     tool_calls_trace: list[dict[str, Any]] = []
 
+    # 审计配对用：按工具名分组，记下 start 时的审计 id 与时间戳。
+    # 为什么按名字分队列而不是按调用 id：on_tool_start / on_tool_end 事件里
+    # 不带 tool_call_id（只有 name），只能靠"先进先出"配对；
+    # 同一轮并发调同一个工具时，队列顺序与实际完成顺序可能错位，
+    # 所以耗时是近似的——这点误差换成"记得下来且不会丢"是划算的。
+    open_calls: dict[str, list[tuple[str, float]]] = {}
+
     try:
         async for event in graph.astream_events(inputs, version="v2", config=config):
             kind = event.get("event")
@@ -241,11 +265,24 @@ async def stream_chat(session_id: str, user_text: str) -> AsyncIterator[dict[str
                     "input": event["data"].get("input", {}),
                 }
                 tool_calls_trace.append({"name": name, "input": payload["input"]})
+                audit_id = await audit_store.start(
+                    session_id=session_id, tool=name, args=payload["input"]
+                )
+                open_calls.setdefault(name, []).append((audit_id, time.time()))
                 yield payload
 
             elif kind == "on_tool_end":
                 output = event["data"].get("output")
                 text = output.content if isinstance(output, ToolMessage) else str(output)
+                pending = open_calls.get(name) or []
+                if pending:
+                    audit_id, started_at = pending.pop(0)
+                    await audit_store.finish(
+                        audit_id,
+                        output=text,
+                        status=_judge_tool_status(text),
+                        elapsed_ms=int((time.time() - started_at) * 1000),
+                    )
                 yield {"type": "tool_end", "name": name, "output": text[:2000]}
 
     except Exception as exc:  # noqa: BLE001 —— 图执行异常要传给前端，而不是静默失败
@@ -269,19 +306,33 @@ async def stream_chat(session_id: str, user_text: str) -> AsyncIterator[dict[str
 
 
 async def execute_action(action_id: str) -> dict[str, Any]:
-    """执行用户已确认的变更操作。"""
+    """执行用户已确认的变更操作。
+
+    状态流转：pending → executing → executed / failed
+    中间那一步"executing"是给管理端看的：审批界面能显示"正在执行"，
+    而不是点完确认之后干等到有结果。
+    """
     action = await store.get_action(action_id)
     if not action:
         return {"ok": False, "error": "操作不存在或已过期"}
     if action.get("status") != "pending":
         return {"ok": False, "error": f"操作状态为 {action.get('status')}，不可重复执行"}
 
+    await store.update_action(action_id, {"status": "executing", "started_at": time.time()})
+
     result = await command_guard.run(action["command"], timeout=30)
     status = "executed" if result.ok else "failed"
     await store.update_action(
         action_id,
         {"status": status, "exit_code": result.exit_code, "output": result.stdout[:2000],
-         "error": result.error or result.stderr[:500]},
+         "error": result.error or result.stderr[:500], "finished_at": time.time()},
+    )
+    await audit_store.log_action_event(
+        action_id=action_id,
+        command=action["command"],
+        actor="system",
+        status=status,
+        detail=result.to_text(),
     )
     return {
         "ok": result.ok,

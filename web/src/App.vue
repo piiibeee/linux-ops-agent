@@ -1,64 +1,10 @@
 <template>
-  <div class="app-shell">
-    <header class="topbar">
-      <div class="brand">
-        <span class="logo">◈</span>
-        <div>
-          <p class="title">Linux 运维 Agent</p>
-          <p class="subtitle">LangGraph · RAG · 人在回路</p>
-        </div>
-      </div>
-    </header>
-    <main class="body">
-      <ChatPanel />
-    </main>
-  </div>
+  <!-- 只留一个出口：布局、顶栏、侧边栏都下沉到 layouts/AdminLayout.vue -->
+  <router-view />
 </template>
 
 <script setup>
-import ChatPanel from './components/ChatPanel.vue'
+// App.vue 不再承担布局职责。
+// 改造前这里是"顶栏 + 一个 ChatPanel"，页面只有一种形态；
+// 现在有四个视图，布局必须抽出去，否则每加一页都要复制一份顶栏。
 </script>
-
-<style scoped>
-.app-shell {
-  display: flex;
-  flex-direction: column;
-  height: 100vh;
-}
-
-.topbar {
-  flex: 0 0 auto;
-  background: #14355a;
-  color: #fff;
-  padding: 14px 24px;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.logo {
-  font-size: 20px;
-  opacity: 0.9;
-}
-
-.title {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0.5px;
-}
-
-.subtitle {
-  margin: 2px 0 0;
-  font-size: 11px;
-  opacity: 0.65;
-}
-
-.body {
-  flex: 1;
-  min-height: 0;
-}
-</style>

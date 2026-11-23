@@ -188,6 +188,8 @@ else
 fi
 
 # ── 11. Nginx ───────────────────────────────────────────
+mkdir -p /etc/nginx/snippets
+cp "${APP_DIR}/deploy/nginx-ops-proxy.conf" /etc/nginx/snippets/ops-agent-proxy.conf
 cp "${APP_DIR}/deploy/nginx-ops-agent-ratelimit.conf" /etc/nginx/conf.d/ops-agent-ratelimit.conf
 cp "${APP_DIR}/deploy/nginx-ops-agent.conf" /etc/nginx/sites-available/ops-agent
 ln -sf /etc/nginx/sites-available/ops-agent /etc/nginx/sites-enabled/ops-agent

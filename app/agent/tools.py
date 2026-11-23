@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import time
 import re
 import uuid
 
@@ -261,6 +262,8 @@ async def propose_action(action: str, target: str = "", reason: str = "") -> str
 
     action_record = {
         "action_id": uuid.uuid4().hex[:12],
+        # 时间戳供管理端审批列表排序与耗时统计用
+        "created_at": time.time(),
         "session_id": current_session_id.get(),
         "action": action,
         "target": target,

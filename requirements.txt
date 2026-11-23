@@ -15,6 +15,12 @@ langgraph==0.2.62
 chromadb==0.5.23
 redis==5.2.1
 
+# chromadb 0.5.x 内部调用 posthog.capture(distinct_id, event, properties) 三个位置参数，
+# 而 posthog 4+ 改成了关键字签名，装上新版就会一直打印：
+#   Failed to send telemetry event ClientStartEvent: capture() takes 1 positional argument but 3 were given
+# 不影响检索结果，但会污染日志、干扰排错。锁在 3.x。
+posthog<4
+
 # 测试
 pytest==8.3.4
 pytest-asyncio==0.25.0

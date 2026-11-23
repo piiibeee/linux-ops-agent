@@ -144,5 +144,36 @@ class MemoryStore:
                 result.append(action)
         return result
 
+    async def list_actions(self, status: str | None = None) -> list[dict[str, Any]]:
+        """列出全部变更单，不限状态。
+
+        为什么不能复用 list_pending：待确认索引只记 pending 的 id，一旦执行完
+        就查不到了。管理端要看到"历史上有哪些变更、谁批的、结果如何"，
+        所以这里直接扫 action:* 键。
+
+        注意：Redis 用 scan_iter 而不是 keys，避免大 key 阻塞。
+        真上规模应改成独立的有序集合（ZSET by created_at），这里保持最小实现。
+        """
+        keys: list[str] = []
+        if self._redis is not None:
+            async for k in self._redis.scan_iter(match="action:*"):
+                keys.append(k)
+        else:
+            keys = [k for k in self._local if k.startswith("action:")]
+
+        actions: list[dict[str, Any]] = []
+        for key in keys:
+            if key.startswith("action:pending:"):
+                continue
+            action = await self.get_action(key.split("action:", 1)[1])
+            if not action:
+                continue
+            if status and action.get("status") != status:
+                continue
+            actions.append(action)
+
+        actions.sort(key=lambda a: a.get("created_at") or 0, reverse=True)
+        return actions
+
 
 store = MemoryStore()
