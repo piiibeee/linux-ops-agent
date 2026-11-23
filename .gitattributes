@@ -1,0 +1,13 @@
+# 全仓统一 LF。
+# 这个仓库在 Windows 上开发、在 Linux 上部署：
+# core.autocrlf=true 会让 checkout 出来的文件带 CRLF，
+# 而 shell 脚本一带 CRLF，在 Linux 上就报 bash: $'\r': command not found。
+* text=auto eol=lf
+
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.pdf  binary
+*.zip  binary
